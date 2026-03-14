@@ -1,4 +1,5 @@
 name: 'goship'
+author: 'saintedlama'
 description: 'Run Go tests, coverage, vet, and fmt — and add beautiful results to the GitHub step summary.'
 branding:
   icon: 'anchor'
