@@ -327,7 +327,7 @@ func BuildCoverageMarkdown(results *coverage.Results) string {
 	}
 	root, prefix := commonRoot(pkgNames)
 
-	fmt.Fprintln(&b, "## \U0001f5faï¸ Coverage")
+	fmt.Fprintln(&b, "## \U0001f5fa Coverage")
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "%d package(s), %.1f%% coverage\n", len(results.Packages), results.Total)
 	if root != "" {
