@@ -1,0 +1,26 @@
+name: 'goship'
+description: 'Short description of what goship does.'
+branding:
+  icon: 'anchor'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'GitHub token for API access'
+    required: false
+    default: ${{ github.token }}
+  working-directory:
+    description: 'Working directory for the action'
+    required: false
+    default: '.'
+
+outputs:
+  result:
+    description: 'Result of the action'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    GITHUB_TOKEN: ${{ inputs.token }}
+    WORKING_DIRECTORY: ${{ inputs.working-directory }}
