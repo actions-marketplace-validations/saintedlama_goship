@@ -5,7 +5,7 @@ on:
     workflows: ["ci"]
     types: [completed]
     branches:
-      - master
+      - main
 
 permissions:
   contents: write
