@@ -17,12 +17,10 @@ func main() {
 		Fmt:              action.ParseBool(getInputWithDefault("FMT", "true")),
 	}
 
-	passed, err := action.Run(cfg)
+	err := action.Run(cfg)
+
 	if err != nil {
 		writeError(err.Error())
-		os.Exit(1)
-	}
-	if !passed {
 		os.Exit(1)
 	}
 }

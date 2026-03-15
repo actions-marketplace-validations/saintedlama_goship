@@ -13,12 +13,28 @@ import (
 
 // WriteStepSummary appends a Markdown test report to $GITHUB_STEP_SUMMARY.
 // When the env var is not set (local development), it writes to stdout.
-func WriteStepSummary(results *tester.Results) error {
-	md := BuildMarkdown(results)
+func WriteStepSummary(
+	testResults *tester.Results,
+	coverageResults *coverage.Results,
+	vetResults *vet.Results,
+	fmtResults *format.Results,
+) error {
+	sb := strings.Builder{}
+
+	summary := buildSummaryMarkdown(testResults, coverageResults, vetResults, fmtResults)
+	sb.WriteString(summary)
+	sb.WriteString("\n")
+	sb.WriteString(buildTestMarkdown(testResults))
+	sb.WriteString("\n")
+	sb.WriteString(buildCoverageMarkdown(coverageResults))
+	sb.WriteString("\n")
+	sb.WriteString(buildVetMarkdown(vetResults))
+	sb.WriteString("\n")
+	sb.WriteString(buildFmtMarkdown(fmtResults))
 
 	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
 	if summaryFile == "" {
-		fmt.Print(md)
+		fmt.Print(sb.String())
 		return nil
 	}
 
@@ -28,13 +44,56 @@ func WriteStepSummary(results *tester.Results) error {
 	}
 	defer f.Close()
 
-	_, err = fmt.Fprint(f, md)
+	_, err = fmt.Fprint(f, sb.String())
 	return err
 }
 
-// BuildMarkdown renders results as a Markdown string suitable for GitHub Step Summary.
+// buildSummaryMarkdown creates a concise summary block for all steps.
+func buildSummaryMarkdown(
+	testResults *tester.Results,
+	coverageResults *coverage.Results,
+	vetResults *vet.Results,
+	fmtResults *format.Results,
+) string {
+	var sb strings.Builder
+	sb.WriteString("# Summary\n\n")
+
+	// Tests
+	total := testResults.Passed() + testResults.Failed() + testResults.Skipped()
+	icon := "✅"
+	if testResults.Failed() > 0 || testResults.BuildError != "" {
+		icon = "❌"
+	}
+	sb.WriteString(fmt.Sprintf("%s Tests (%d/%d)\n", icon, testResults.Passed(), total))
+
+	// Coverage
+	covIcon := "✅"
+	covPct := 0.0
+	if coverageResults != nil {
+		covPct = coverageResults.Total
+	}
+	sb.WriteString(fmt.Sprintf("%s Coverage (%.0f%%)\n", covIcon, covPct))
+
+	// Vet
+	vetIcon := "✅"
+	if vetResults != nil && (len(vetResults.Findings) > 0 || vetResults.BuildError != "") {
+		vetIcon = "❌"
+	}
+	sb.WriteString(fmt.Sprintf("%s Vet\n", vetIcon))
+
+	// Format
+	fmtIcon := "✅"
+	if fmtResults != nil && fmtResults.HasIssues() {
+		fmtIcon = "❌"
+	}
+	sb.WriteString(fmt.Sprintf("%s Format\n", fmtIcon))
+
+	return sb.String()
+}
+
+// buildTestMarkdown renders results as a Markdown string suitable for GitHub Step Summary.
 // Exported so it can be used in tests.
-func BuildMarkdown(results *tester.Results) string {
+func buildTestMarkdown(results *tester.Results) string {
 	var b strings.Builder
 
 	pkgNames := make([]string, len(results.Packages))
@@ -169,30 +228,9 @@ func actionIcon(action string) string {
 	}
 }
 
-// WriteVetSection appends a Markdown vet report to $GITHUB_STEP_SUMMARY.
-// When the env var is not set (local development), it writes to stdout.
-func WriteVetSection(results *vet.Results) error {
-	md := BuildVetMarkdown(results)
-
-	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
-	if summaryFile == "" {
-		fmt.Print(md)
-		return nil
-	}
-
-	f, err := os.OpenFile(summaryFile, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open GITHUB_STEP_SUMMARY: %w", err)
-	}
-	defer f.Close()
-
-	_, err = fmt.Fprint(f, md)
-	return err
-}
-
-// BuildVetMarkdown renders vet results as a Markdown string.
+// buildVetMarkdown renders vet results as a Markdown string.
 // Exported so it can be used in tests.
-func BuildVetMarkdown(results *vet.Results) string {
+func buildVetMarkdown(results *vet.Results) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "## 🧭 Vet")
@@ -248,7 +286,7 @@ func BuildVetMarkdown(results *vet.Results) string {
 // WriteFmtSection appends a Markdown gofmt report to $GITHUB_STEP_SUMMARY.
 // When the env var is not set (local development), it writes to stdout.
 func WriteFmtSection(results *format.Results) error {
-	md := BuildFmtMarkdown(results)
+	md := buildFmtMarkdown(results)
 
 	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
 	if summaryFile == "" {
@@ -266,9 +304,9 @@ func WriteFmtSection(results *format.Results) error {
 	return err
 }
 
-// BuildFmtMarkdown renders gofmt results as a Markdown string.
+// buildFmtMarkdown renders gofmt results as a Markdown string.
 // Exported so it can be used in tests.
-func BuildFmtMarkdown(results *format.Results) string {
+func buildFmtMarkdown(results *format.Results) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "## 🏄🏾 Fmt")
@@ -295,30 +333,9 @@ func BuildFmtMarkdown(results *format.Results) string {
 	return b.String()
 }
 
-// WriteCoverageSection appends a Markdown coverage section to $GITHUB_STEP_SUMMARY.
-// When the env var is not set (local development), it writes to stdout.
-func WriteCoverageSection(results *coverage.Results) error {
-	md := BuildCoverageMarkdown(results)
-
-	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
-	if summaryFile == "" {
-		fmt.Print(md)
-		return nil
-	}
-
-	f, err := os.OpenFile(summaryFile, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open GITHUB_STEP_SUMMARY: %w", err)
-	}
-	defer f.Close()
-
-	_, err = fmt.Fprint(f, md)
-	return err
-}
-
-// BuildCoverageMarkdown renders coverage results as a Markdown string.
+// buildCoverageMarkdown renders coverage results as a Markdown string.
 // Exported so it can be used in tests.
-func BuildCoverageMarkdown(results *coverage.Results) string {
+func buildCoverageMarkdown(results *coverage.Results) string {
 	var b strings.Builder
 
 	pkgNames := make([]string, len(results.Packages))

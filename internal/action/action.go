@@ -2,6 +2,7 @@ package action
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -11,6 +12,31 @@ import (
 	"github.com/saintedlama/goship/internal/tester"
 	"github.com/saintedlama/goship/internal/vet"
 )
+
+// StepStatus represents the outcome of a single action step.
+type StepStatus string
+
+const (
+	StatusPassed   StepStatus = "passed"
+	StatusFailed   StepStatus = "failed"
+	StatusDisabled StepStatus = "disabled"
+)
+
+// Result holds the per-step outcome of a Run.
+type Result struct {
+	Test     StepStatus
+	Coverage StepStatus
+	Vet      StepStatus
+	Fmt      StepStatus
+}
+
+// Passed reports whether every enabled step passed.
+func (r Result) Passed() bool {
+	return r.Test != StatusFailed &&
+		r.Coverage != StatusFailed &&
+		r.Vet != StatusFailed &&
+		r.Fmt != StatusFailed
+}
 
 // Config holds all configuration parsed from GitHub Actions inputs.
 type Config struct {
@@ -22,89 +48,134 @@ type Config struct {
 	Fmt              bool // whether to run gofmt and report unformatted files
 }
 
-// Run executes the action. It returns false when any check fails (so the
-// caller can exit with a non-zero code) and a non-nil error only when the
-// action itself cannot complete (e.g. cannot change directory, cannot write
-// summary). All enabled steps are always run regardless of prior failures.
-func Run(cfg Config) (passed bool, err error) {
+// Run executes the action. It returns a Result describing each step's
+// outcome and a non-nil error only when the action itself cannot complete
+// (e.g. cannot change directory, cannot write summary). All enabled steps
+// are always run regardless of prior failures.
+func Run(cfg Config) error {
+	slog.Info("changing working directory", "dir", cfg.WorkingDirectory)
 	if err := os.Chdir(cfg.WorkingDirectory); err != nil {
-		return false, fmt.Errorf("change working directory to %q: %w", cfg.WorkingDirectory, err)
+		slog.Error("failed to change directory", "err", err)
+		return fmt.Errorf("change working directory to %q: %w", cfg.WorkingDirectory, err)
 	}
 
-	allPassed := true
+	testResults, coverageResults, err := runTests(cfg)
 
-	if cfg.Test {
-		testArgs := []string{"./..."}
+	if err != nil {
+		return fmt.Errorf("run tests: %w", err)
+	}
 
-		// When coverage is requested, create a temp file and append -coverprofile so
-		// the single test run produces both JSON output and a coverage profile.
-		var profilePath string
-		if cfg.Coverage {
-			f, err := os.CreateTemp("", "goship-cover-*.out")
-			if err != nil {
-				return false, fmt.Errorf("create coverage profile: %w", err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-			profilePath = f.Name()
-			testArgs = append(testArgs, "-coverprofile="+profilePath)
-		}
+	vetResults, err := runVet(cfg)
+	if err != nil {
+		return fmt.Errorf("run vet: %w", err)
+	}
 
-		results, err := tester.Run(cfg.WorkingDirectory, testArgs)
+	fmtResults, err := runFmt(cfg)
+	if err != nil {
+		return fmt.Errorf("run fmt: %w", err)
+	}
+
+	// Write summary
+	if testResults == nil {
+		testResults = &tester.Results{}
+	}
+	if err := report.WriteStepSummary(testResults, coverageResults, vetResults, fmtResults); err != nil {
+		slog.Error("failed to write step summary", "err", err)
+		return fmt.Errorf("write step summary: %w", err)
+	}
+
+	return nil
+}
+
+// runTests runs go test and optionally collects a coverage profile.
+// Returns nil results (not an error) when cfg.Test is disabled.
+func runTests(cfg Config) (*tester.Results, *coverage.Results, error) {
+	if !cfg.Test {
+		return nil, nil, nil
+	}
+
+	slog.Info("running tests")
+	testArgs := []string{"./..."}
+	var profilePath string
+	if cfg.Coverage {
+		slog.Info("coverage enabled, preparing coverage profile")
+		f, err := os.CreateTemp("", "goship-cover-*.out")
 		if err != nil {
-			return false, fmt.Errorf("run tests: %w", err)
+			slog.Error("failed to create coverage profile", "err", err)
+			return nil, nil, fmt.Errorf("create coverage profile: %w", err)
 		}
-		if err := report.WriteStepSummary(results); err != nil {
-			return false, fmt.Errorf("write test summary: %w", err)
-		}
-		if results.HasFailures() {
-			allPassed = false
-		}
-		if results.BuildError != "" {
-			allPassed = false
-		}
-
-		if cfg.Coverage && profilePath != "" && results.BuildError == "" {
-			covResults, err := coverage.Run(cfg.WorkingDirectory, profilePath)
-			if err != nil {
-				return false, fmt.Errorf("collect coverage: %w", err)
-			}
-			if err := report.WriteCoverageSection(covResults); err != nil {
-				return false, fmt.Errorf("write coverage summary: %w", err)
-			}
-		}
+		f.Close()
+		defer os.Remove(f.Name())
+		profilePath = f.Name()
+		testArgs = append(testArgs, "-coverprofile="+profilePath)
 	}
 
-	if cfg.Vet {
-		vetResults, err := vet.Run(cfg.WorkingDirectory)
+	results, err := tester.Run(cfg.WorkingDirectory, testArgs)
+	if err != nil {
+		slog.Error("test execution failed", "err", err)
+		return nil, nil, fmt.Errorf("run tests: %w", err)
+	}
+	slog.Info("tests completed", "passed", results.Passed(), "failed", results.Failed(), "skipped", results.Skipped())
+	if results.HasFailures() {
+		slog.Warn("some tests failed")
+	}
+	if results.BuildError != "" {
+		slog.Error("build error during tests", "buildError", results.BuildError)
+	}
+
+	var coverageResults *coverage.Results
+	if cfg.Coverage && profilePath != "" && results.BuildError == "" {
+		slog.Info("collecting coverage")
+		covResults, err := coverage.Run(cfg.WorkingDirectory, profilePath)
 		if err != nil {
-			return false, fmt.Errorf("run vet: %w", err)
+			slog.Error("failed to collect coverage", "err", err)
+			return results, nil, fmt.Errorf("collect coverage: %w", err)
 		}
-		if err := report.WriteVetSection(vetResults); err != nil {
-			return false, fmt.Errorf("write vet summary: %w", err)
-		}
-		if vetResults.HasIssues() {
-			allPassed = false
-		}
-		if vetResults.BuildError != "" {
-			allPassed = false
-		}
+		coverageResults = covResults
 	}
 
-	if cfg.Fmt {
-		fmtResults, err := format.Run(cfg.WorkingDirectory)
-		if err != nil {
-			return false, fmt.Errorf("run fmt: %w", err)
-		}
-		if err := report.WriteFmtSection(fmtResults); err != nil {
-			return false, fmt.Errorf("write fmt summary: %w", err)
-		}
-		if fmtResults.HasIssues() {
-			allPassed = false
-		}
+	return results, coverageResults, nil
+}
+
+// runVet runs go vet.
+// Returns nil results (not an error) when cfg.Vet is disabled.
+func runVet(cfg Config) (*vet.Results, error) {
+	if !cfg.Vet {
+		return nil, nil
 	}
 
-	return allPassed, nil
+	slog.Info("running vet")
+	results, err := vet.Run(cfg.WorkingDirectory)
+	if err != nil {
+		slog.Error("vet execution failed", "err", err)
+		return nil, fmt.Errorf("run vet: %w", err)
+	}
+	if results.HasIssues() {
+		slog.Warn("vet found issues")
+	}
+	if results.BuildError != "" {
+		slog.Error("build error during vet", "buildError", results.BuildError)
+	}
+	return results, nil
+}
+
+// runFmt runs gofmt.
+// Returns nil results (not an error) when cfg.Fmt is disabled.
+func runFmt(cfg Config) (*format.Results, error) {
+	if !cfg.Fmt {
+		return nil, nil
+	}
+
+	slog.Info("running gofmt")
+	results, err := format.Run(cfg.WorkingDirectory)
+	if err != nil {
+		slog.Error("gofmt execution failed", "err", err)
+		return nil, fmt.Errorf("run fmt: %w", err)
+	}
+	if results.HasIssues() {
+		slog.Warn("some files need formatting")
+	}
+	return results, nil
 }
 
 // ParseBool returns true for "1", "true", "yes" (case-insensitive), else false.
